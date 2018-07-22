@@ -33,7 +33,7 @@ public class Tests
     [TestMethod]
     public void TestSolver()
     {
-        var testCase = 19;
+        var testCase = 20;
 
         var target = Model.Load(File.ReadAllBytes($"{root}\\problems\\LA{testCase:D3}_tgt.mdl"));
 

@@ -1,4 +1,5 @@
-﻿using Priority_Queue;
+﻿using Newtonsoft.Json;
+using Priority_Queue;
 using System;
 using System.IO;
 using System.Collections.Generic;
@@ -10,6 +11,14 @@ using System.Threading.Tasks;
 
 public class Program
 {
+    public class Result
+    {
+        public string solution;
+        public string model;
+        public long score;
+        public int solutionSize;
+    }
+
     static void Main(string[] args)
     {
         try
@@ -43,17 +52,20 @@ public class Program
 
         state.Execute(solution);
 
-        var bytes = Convert.ToBase64String(Command.GetBytes(solution).Select(i => (byte)i).ToArray());
+        var solutionFileName = @"d:\icfp2018\solutions\" + Guid.NewGuid().ToString("D");
+        File.WriteAllBytes(solutionFileName, Command.GetBytes(solution).Select(i => (byte)i).ToArray());
 
         if (target.Equals(state.Model))
         {
-            Console.WriteLine(
-               $"{{\r\n" +
-               $"    'score': {1000000000L-state.Energy},\r\n" +
-               $"    'model': '{state.Model}',\r\n" +
-               $"    'solutionSize': {solution.Count},\r\n" +
-               $"    'solution': '{bytes}'\r\n" +
-               $"}}");
+            Console.Write(JsonConvert.SerializeObject(new Result()
+            {
+                score = 1000000000L - state.Energy,
+                model = state.Model.ToString(),
+                solutionSize = solution.Count,
+                solution = solutionFileName
+            }));
+
+            Console.Out.Flush();
         }
 
         Environment.Exit(0);
