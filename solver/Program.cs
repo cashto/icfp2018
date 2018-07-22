@@ -1,8 +1,10 @@
 ﻿using Priority_Queue;
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Diagnostics;
+using System.Threading;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -10,6 +12,51 @@ public class Program
 {
     static void Main(string[] args)
     {
+        try
+        {
+            RealMain(
+                args[0],
+                int.Parse(args[1]));
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e.ToString());
+        }
+    }
+
+    static void RealMain(string fileName, int timeout)
+    { 
+        var thread = new Thread(
+            () =>
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(timeout));
+                Environment.Exit(-1);
+            });
+
+        thread.Start();
+
+        var target = Model.Load(File.ReadAllBytes(fileName));
+
+        var solution = Program.Solve(target);
+
+        var state = new State(new Model(target.Resolution));
+
+        state.Execute(solution);
+
+        var bytes = Convert.ToBase64String(Command.GetBytes(solution).Select(i => (byte)i).ToArray());
+
+        if (target.Equals(state.Model))
+        {
+            Console.WriteLine(
+               $"{{\r\n" +
+               $"    'score': {1000000000L-state.Energy},\r\n" +
+               $"    'model': '{state.Model}',\r\n" +
+               $"    'solutionSize': {solution.Count},\r\n" +
+               $"    'solution': '{bytes}'\r\n" +
+               $"}}");
+        }
+
+        Environment.Exit(0);
     }
 
     public static List<Command> Solve(Model target)
@@ -1148,6 +1195,14 @@ public class Chunk
         {
             return null;
         }
+        else if (target != null)
+        {
+            var exitPoint = Offset + new Point(1, 1, 1) + forwards + forwards;
+            if (!model.InBounds(exitPoint) || model.Get(exitPoint))
+            {
+                return null;
+            }
+        }
 
         overrideModel.Clear();
 
@@ -1174,21 +1229,31 @@ public class Chunk
     {
         var backwards = new Point(-forwards.X, -forwards.Y, -forwards.Z);
 
-        yield return new Command(CommandType.SMove) { P1 = backwards };
-        foreach (var command in tryFill(model, backwards, forwards))
+        if (model.InBounds(Offset + new Point(1, 1, 1) + backwards))
+        {
+            yield return new Command(CommandType.SMove) { P1 = backwards };
+            foreach (var command in tryFill(model, backwards, forwards))
+            {
+                yield return command;
+            }
+
+            yield return new Command(CommandType.SMove) { P1 = forwards };
+            foreach (var command in tryFill(model, new Point(0, 0, 0), forwards))
+            {
+                yield return command;
+            }
+        }
+
+        yield return new Command(CommandType.SMove) { P1 = forwards };
+        foreach (var command in tryFill(model, forwards, forwards))
         {
             yield return command;
         }
 
-        var offset = backwards;
-        for (var i = 0; i < 3; ++i)
+        yield return new Command(CommandType.SMove) { P1 = forwards };
+        foreach (var command in tryFill(model, forwards + forwards, forwards))
         {
-            yield return new Command(CommandType.SMove) { P1 = forwards };
-            offset = offset + forwards;
-            foreach (var command in tryFill(model, offset, forwards))
-            {
-                yield return command;
-            }
+            yield return command;
         }
     }
 
@@ -1208,7 +1273,8 @@ public class Chunk
                     {
                         var p = Offset + new Point(x, y, z);
 
-                        if (target.Get(p) && 
+                        if (target.InBounds(p) &&
+                            target.Get(p) && 
                             !get(model, p) &&
                             (p.Y == 0 || Point.CardinalDirections.Any(d => get(model, p + d))))
                         {
@@ -1238,6 +1304,7 @@ public class Chunk
                 var p = Offset + offset + dir + new Point(1, 1, 1);
 
                 if (isInRange(p) &&
+                    target.InBounds(p) &&
                     target.Get(p) &&
                     !get(model, p))
                 {
