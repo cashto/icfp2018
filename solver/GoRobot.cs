@@ -17,6 +17,8 @@ using System.Threading.Tasks;
 
 public class Program
 {
+    public static int MaxRobots = 40;
+
     public class Result
     {
         public string solution;
@@ -33,7 +35,8 @@ public class Program
         {
             RealMain(
                 args[0],
-                int.Parse(args[1]));
+                int.Parse(args[1]),
+                args.Length > 2 ? int.Parse(args[2]) : Program.MaxRobots);
         }
         catch (Exception e)
         {
@@ -41,8 +44,10 @@ public class Program
         }
     }
 
-    static void RealMain(string fileName, int timeout)
-    { 
+    static void RealMain(string fileName, int timeout, int maxRobots)
+    {
+        Program.MaxRobots = maxRobots;
+
         var thread = new Thread(
             () =>
             {
@@ -391,8 +396,7 @@ public class Program
                 .ToList();
 
             // Fission new bots
-            int maxBots = 40;
-            int newBots = Math.Min(maxBots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
+            int newBots = Math.Min(Program.MaxRobots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
             for (var i = 0; i < newBots; ++i)
             {
                 var chunk = reallyReadyChunks[i];
@@ -415,13 +419,20 @@ public class Program
             do
             {
                 var idleBots = botPlans.Values.Where(bot => bot.IsIdle());
+                if (!idleBots.Any())
+                {
+                    break;
+                }
+
                 var possibleJobs =
                     from chunk in reallyReadyChunks
-                    let newWorkingChunks = workingChunks.Concat(new List<Chunk>() { chunk })
                     // make sure we're not accidentally sealing a chunk in
-                    where readyChunks.All(c =>  
-                        Point.CardinalDirections.Any(dir =>
-                            !newWorkingChunks.Any(w => w.Offset.Equals(c.Offset + 3 * dir))))
+                    //let newWorkingChunks = workingChunks.Concat(new List<Chunk>() { chunk })
+                    //where readyChunks.All(c =>
+                    //    Point.CardinalDirections.Any(dir =>
+                    //        !newWorkingChunks.Any(w => w.Offset.Equals(c.Offset + 3 * dir))))
+                    let isReallyReallyReadyChunk = state.Model.CheckSolid(target, workingChunks, chunk)
+                    where isReallyReallyReadyChunk
                     from bot in idleBots
                     let mdist = (chunk.GetCenter() - bot.Bot.P).MDist()
                     orderby mdist
@@ -438,8 +449,14 @@ public class Program
                     newlyDoneChunks.Add(chunk);
                 });
 
-                reallyReadyChunks.Remove(firstJob.chunk);
+                reallyReadyChunks = readyChunks.Where(chunk =>
+                    Point.CardinalDirections.All(dir =>
+                        botPlans.Values.All(b => b.Chunk == null || !b.Chunk.Offset.Equals(chunk.Offset + 3 * dir))))
+                    .ToList();
+
                 readyChunks.Remove(firstJob.chunk);
+
+                Trace.Write($"{firstJob.bot.Bot.Id}: adding chunk {firstJob.chunk}");
                 workingChunks.Add(firstJob.chunk);
             } while (true);
 
@@ -495,12 +512,12 @@ public class Program
                     }
                 }
 
-                Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
+                // Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
                 yield return command;
                 commands.Add(command);
             }
 
-            state.Execute(commands);
+            state.Execute(commands, paint: true);
 
             // Update BotPlans due to bots being created or destroyed
             botPlans = state.Bots.Values.ToDictionary(
@@ -911,6 +928,53 @@ public class Model
         }
     }
 
+    public bool CheckSolid(
+        Model target,
+        List<Chunk> workingChunks,
+        Chunk newChunk)
+    {
+        var start = DateTime.UtcNow;
+
+        var pointsSet = 0;
+        var r = (Resolution - 1) / 3 + 2;
+        var model = new Model(r);
+
+        foreach (var chunk in workingChunks.Concat(new List<Chunk>() { newChunk }))
+        {
+            var p = new Point(
+                (chunk.Offset.X - 1) / 3 + 1,
+                (chunk.Offset.Y - 0) / 3,
+                (chunk.Offset.Z - 1) / 3 + 1);
+            model.Set(p);
+            ++pointsSet;
+        }
+
+        var points = new HashSet<Point>();
+        points.Add(Point.Zero);
+
+        while (points.Any())
+        {
+            var p = points.First();
+            points.Remove(p);
+
+            foreach (var dir in Point.CardinalDirections)
+            {
+                if (model.InBounds(p + dir) && 
+                    !model.Get(p + dir) &&
+                    !points.Contains(p + dir))
+                {
+                    points.Add(p + dir);
+                }
+            }
+
+            ++pointsSet;
+            model.Set(p);
+        }
+
+        var ret = pointsSet == r * r * r;
+        //Trace.Write($"CheckSolid returns {ret} in {(DateTime.UtcNow - start).TotalMilliseconds} ms");
+        return ret;
+    }
 
     protected void updateGrounded(Point p)
     {
@@ -1800,8 +1864,10 @@ public class Chunk
 
     public IEnumerable<Command> Paint(State state, List<Chunk> workingChunks)
     {
-        foreach (var dir in Point.CardinalDirections
-            .Where(dir => !workingChunks.Any(chunk => chunk.Offset.Equals(Offset + 3 * dir))))
+        var dirs = Point.CardinalDirections
+            .Where(dir => !workingChunks.Any(chunk => chunk.Offset.Equals(Offset + 3 * dir)));
+
+        foreach (var dir in dirs)
         {
             overrideModel.Clear();
             var ret = paint(state.Model, dir).ToList();
