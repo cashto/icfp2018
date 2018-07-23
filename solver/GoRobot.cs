@@ -369,12 +369,15 @@ public class Program
             .Where(chunk => chunk.Offset.Y == 0 && chunk.IsFillable(state.Model))
             .ToList();
         var newlyDoneChunks = new List<Chunk>();
+        bool allowFission = true;
 
         while (
             doneChunks.Count != allChunks.Count ||
             state.Bots.Count != 1 ||
             !state.Bots.First().Value.P.Equals(Point.Zero))
         {
+            Trace.Write($"Progress: {100.0 * doneChunks.Count / allChunks.Count:F2}%");
+
             // Update readyChunks
             foreach (var chunk in newlyDoneChunks)
             {
@@ -396,21 +399,24 @@ public class Program
                 .ToList();
 
             // Fission new bots
-            int newBots = Math.Min(Program.MaxRobots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
-            for (var i = 0; i < newBots; ++i)
+            if (allowFission)
             {
-                var chunk = reallyReadyChunks[i];
-
-                var availableBots =
-                    from bot in botPlans.Values
-                    orderby (bot.Bot.P - chunk.GetCenter()).MDist()
-                    select bot;
-
-                foreach (var bot in availableBots)
+                int newBots = Math.Min(Program.MaxRobots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
+                for (var i = 0; i < newBots; ++i)
                 {
-                    if (bot.SetFissionJob(state))
+                    var chunk = reallyReadyChunks[i];
+
+                    var availableBots =
+                        from bot in botPlans.Values
+                        orderby (bot.Bot.P - chunk.GetCenter()).MDist()
+                        select bot;
+
+                    foreach (var bot in availableBots)
                     {
-                        break;
+                        if (bot.SetFissionJob(state))
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -431,7 +437,7 @@ public class Program
                     //where readyChunks.All(c =>
                     //    Point.CardinalDirections.Any(dir =>
                     //        !newWorkingChunks.Any(w => w.Offset.Equals(c.Offset + 3 * dir))))
-                    let isReallyReallyReadyChunk = state.Model.CheckSolid(target, workingChunks, chunk)
+                    let isReallyReallyReadyChunk = state.Model.CheckSolid(target, workingChunks, chunk) == 0
                     where isReallyReallyReadyChunk
                     from bot in idleBots
                     let mdist = (chunk.GetCenter() - bot.Bot.P).MDist()
@@ -440,7 +446,22 @@ public class Program
 
                 if (!possibleJobs.Any())
                 {
-                    break;
+                    if (state.Bots.Count == 1 &&
+                        reallyReadyChunks.Count != 0)
+                    {
+                        possibleJobs =
+                            from chunk in reallyReadyChunks
+                            from bot in idleBots
+                            orderby state.Model.CheckSolid(target, workingChunks, chunk)
+                            select new { bot = bot, chunk = chunk };
+
+                        Trace.Write("EMERGENCY");
+                        allowFission = false;
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
 
                 var firstJob = possibleJobs.First();
@@ -928,7 +949,7 @@ public class Model
         }
     }
 
-    public bool CheckSolid(
+    public int CheckSolid(
         Model target,
         List<Chunk> workingChunks,
         Chunk newChunk)
@@ -971,7 +992,7 @@ public class Model
             model.Set(p);
         }
 
-        var ret = pointsSet == r * r * r;
+        var ret = r * r * r - pointsSet;
         //Trace.Write($"CheckSolid returns {ret} in {(DateTime.UtcNow - start).TotalMilliseconds} ms");
         return ret;
     }

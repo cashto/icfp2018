@@ -33,7 +33,7 @@ public class Tests
     [TestMethod]
     public void TestSolver()
     {
-        foreach (var testCase in Enumerable.Range(1, 10))
+        foreach (var testCase in Enumerable.Range(22, 1))
         {
             var target = Model.Load(File.ReadAllBytes($"{root}\\problems\\FA{testCase:D3}_tgt.mdl"));
 
