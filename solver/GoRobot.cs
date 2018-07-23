@@ -53,7 +53,7 @@ public class Program
 
         var target = Model.Load(File.ReadAllBytes(fileName));
 
-        var solution = Program.Solve(target);
+        var solution = Program.SolveParallel(target);
 
         var state = new State(new Model(target.Resolution));
 
@@ -68,7 +68,7 @@ public class Program
             {
                 score = 1000000000L - state.Energy,
                 model = state.Model.ToString(),
-                solutionSize = solution.Count,
+                solutionSize = solution.Count(),
                 solution = solutionFileName
             }));
 
@@ -86,7 +86,6 @@ public class Program
 
         private Action<Chunk> onPaintComplete;
         private IEnumerator<Command> paintMoves;
-        private Command droppedMove;
         private Command nextMove;
         private int fusionLock;
         private int failures;
@@ -119,16 +118,6 @@ public class Program
                 ++other.fusionLock;
                 this.FusionTarget = other;
             }
-        }
-
-        public void SetDroppedMove(Command command)
-        {
-            if (droppedMove != null)
-            {
-                throw new Exception("Already have a dropped move");
-            }
-
-            droppedMove = command;
         }
 
         public void SetFusionJob()
@@ -168,28 +157,15 @@ public class Program
         public Command GetCommand(State state, List<Chunk> workingChunks)
         {
             // Priorities: 
-            // 1. don't move if fusion lock (painting is OK).
-            // 2. fusion / fission (per nextMove)
-            // 3. painting
+            // 1. fusion / fission (per nextMove)
+            // 2. painting (but don't move if fusionLocked or someone in the way)
+            // 3. wait if fusionLocked
             // 4. moving to paint chunk
             // 5. moving to fusion partner
             // 6. moving to origin
 
-            var command = getCommandImpl(state, workingChunks);
-
-            if (fusionLock > 0 && 
-                command.Type == CommandType.SMove)
-            {
-                SetDroppedMove(command);
-                return new Command(CommandType.Wait);
-            }
-
             --fissionThrottle;
-            return command;
-        }
 
-        private Command getCommandImpl(State state, List<Chunk> workingChunks)
-        {
             if (nextMove != null)
             {
                 var command = nextMove;
@@ -204,58 +180,28 @@ public class Program
             }
             else if (paintMoves != null)
             {
-                if (droppedMove != null)
-                {
-                    Trace.Write($"{Bot.Id}: doing dropped move {droppedMove}");
-                    var retMove = droppedMove;
-                    droppedMove = null;
-                    return retMove;
-                }
-
-                var ret = paintMoves.Current;
-                if (ret.Type == CommandType.SMove &&
-                    !state.CanMoveTo(Bot.P + ret.P1))
-                {
-                    // someone else is in the way
-                    Trace.Write($"{Bot.Id}: failed to {ret}, someone in the way");
-                    this.CheckDeadlock(false);
-                    return new Command(CommandType.Wait);
-                }
-
-                if (!paintMoves.MoveNext())
-                {
-                    Trace.Write($"{Bot.Id}: done painting {Chunk.GetCenter()}");
-                    onPaintComplete(this.Chunk);
-                    paintMoves = null;
-                    this.Chunk = null;
-                }
-
-                return ret;
+                return goPaint(state);
             }
             else if (Chunk != null && Bot.P.Equals(Chunk.GetCenter()))
             {
                 Trace.Write($"{Bot.Id}: start painting {Chunk.GetCenter()}");
-                paintMoves = Chunk.Paint(state, workingChunks).GetEnumerator();
+
+                // Trim SMoves off the end.
+                paintMoves = Chunk.Paint(state, workingChunks)
+                    .Reverse()
+                    .SkipWhile(command => command.Type == CommandType.SMove)
+                    .Reverse()
+                    .GetEnumerator();
+                
                 paintMoves.MoveNext();
-                var ret = paintMoves.Current;
-                paintMoves.MoveNext();
-                return ret;
+                return goPaint(state);
             }
             else if (fusionLock > 0)
             {
-                // Don't even bother pathfinding, we have to wait.
                 return new Command(CommandType.Wait);
             }
             else
             {
-                if (droppedMove != null)
-                {
-                    Trace.Write($"{Bot.Id}: doing dropped move {droppedMove}");
-                    var retMove = droppedMove;
-                    droppedMove = null;
-                    return retMove;
-                }
-
                 var dest = 
                     Chunk != null ? Chunk.GetCenter() : 
                     FusionTarget != null ? FusionTarget.Bot.P :
@@ -282,6 +228,38 @@ public class Program
 
                 return path.First();
             }
+        }
+
+        private Command goPaint(State state)
+        {
+            var ret = paintMoves.Current;
+            if (ret.Type == CommandType.SMove)
+            {
+                if (fusionLock > 0)
+                {
+                    // someone else is in the way
+                    Trace.Write($"{Bot.Id}: waiting for fusion to complete");
+                    return new Command(CommandType.Wait);
+                }
+
+                if (!state.CanMoveTo(Bot.P + ret.P1))
+                {
+                    // someone else is in the way
+                    Trace.Write($"{Bot.Id}: failed to {ret}, someone in the way");
+                    this.CheckDeadlock(false);
+                    return new Command(CommandType.Wait);
+                }
+            }
+
+            if (!paintMoves.MoveNext())
+            {
+                Trace.Write($"{Bot.Id}: done painting {Chunk.GetCenter()}");
+                onPaintComplete(this.Chunk);
+                paintMoves = null;
+                this.Chunk = null;
+            }
+
+            return ret;
         }
 
         public void CheckDeadlock(bool success)
@@ -368,7 +346,7 @@ public class Program
                     .Where(c => (c.Offset - chunk.Offset).MDist() == 3)
                     .Where(c => !readyChunks.Contains(c))
                     .Where(c => !workingChunks.Contains(c))
-                    .Where(c => chunk.IsFillable(state.Model));
+                    .Where(c => c.IsFillable(state.Model));
                 readyChunks.AddRange(newChunks);
             }
 
@@ -381,7 +359,7 @@ public class Program
                 .ToList();
 
             // Fission new bots
-            int maxBots = 5;
+            int maxBots = 1;
             int newBots = Math.Min(maxBots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
             for (var i = 0; i < newBots; ++i)
             {
@@ -471,7 +449,6 @@ public class Program
                 if (!success)
                 {
                     Trace.Write($"{bot.Bot.Id}: failed to {command}");
-                    bot.SetDroppedMove(command);
                     command = new Command(CommandType.Wait);
                     newVolatileCells = command.GetVolatileCells(bot.Bot.P);
                     success = volatileCells.Add(newVolatileCells);
@@ -481,7 +458,7 @@ public class Program
                     }
                 }
 
-                Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
+                //Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
                 yield return command;
                 commands.Add(command);
             }
@@ -495,77 +472,6 @@ public class Program
         }
 
         yield return new Command(CommandType.Halt);
-    }
-
-    public static List<Command> Solve(Model target)
-    {
-        var dirs = new List<Point>();
-        for (var x = 0; x < 3; ++x)
-        {
-            for (var z = 0; z < 3; ++z)
-            {
-                dirs.Add(new Point(x, 0, z));
-            }
-        }
-
-        var state = new State(new Model(target.Resolution));
-
-        var chunks = target.GetChunks()
-            .Where(chunk => chunk.TargetPointsCount > 0)
-            .ToList();
-
-        IEnumerable<Command> ans = solveIter(
-            state,
-            Chunk.Origin,
-            chunks,
-            new Stack<Chunk>());
-
-        //var first = Chunk.Origin.PaintAndMoveTo(state, chunks.First());
-        //var second = chunks.First().PaintAndMoveTo(state, Chunk.Origin);
-        //var ans = first.Concat(second);
-
-        return ans
-            .Concat(new List<Command>() { new Command(CommandType.Halt) })
-            .ToList();
-    }
-
-    private static List<Command> solveIter(
-        State state,
-        Chunk currentChunk,
-        List<Chunk> chunksToVisit,
-        Stack<Chunk> visitedChunks)
-    {
-        Trace.Write($"{currentChunk.Offset} {string.Join(" ", visitedChunks.Select(i => i.Offset.ToString()))}");
-
-        if (!chunksToVisit.Any())
-        {
-            return currentChunk.PaintAndMoveTo(state.Clone(), Chunk.Origin).ToList();
-        }
-
-        var orderedChunksToVisit =
-            from chunk in chunksToVisit
-            where chunk.Offset.Y == 0 || visitedChunks.Any(c => (c.Offset - chunk.Offset).MDist() == 3)
-            orderby (chunk.Offset - currentChunk.Offset).MDist(), chunk.Offset.Y, chunk.Offset.X, chunk.Offset.Z
-            select chunk;
-
-        foreach (var chunk in orderedChunksToVisit)
-        {
-            var stateClone = state.Clone();
-            var moves = currentChunk.PaintAndMoveTo(stateClone, chunk);
-            if (moves != null && chunk.IsFillable(stateClone.Model))
-            {
-                var remainingChunks = chunksToVisit.Where(i => !i.Offset.Equals(chunk.Offset)).ToList();
-                visitedChunks.Push(currentChunk);
-                var tailMoves = solveIter(stateClone, chunk, remainingChunks, visitedChunks);
-                visitedChunks.Pop();
-                if (tailMoves.Any())
-                {
-                    return moves.Concat(tailMoves).ToList();
-                }
-            }
-        }
-
-        return new List<Command>();
     }
 }
 
@@ -1744,6 +1650,11 @@ public class Chunk
                 }
             }
         }
+    }
+
+    public override string ToString()
+    {
+        return GetCenter().ToString();
     }
 
     public Point GetCenter()
