@@ -10,6 +10,7 @@ using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Diagnostics;
+
 using System.Threading;
 using System.Text;
 using System.Threading.Tasks;
@@ -66,7 +67,7 @@ public class Program
         {
             Console.Write(JsonConvert.SerializeObject(new Result()
             {
-                score = 1000000000L - state.Energy,
+                score = -state.Energy,
                 model = state.Model.ToString(),
                 solutionSize = solution.Count(),
                 solution = solutionFileName
@@ -122,7 +123,8 @@ public class Program
 
         public void SetFusionJob()
         {
-            if (FusionTarget.nextMove == null)
+            if (FusionTarget.nextMove == null &&
+                fusionLock == 0)
             {
                 var delta = this.Bot.P - FusionTarget.Bot.P;
                 this.nextMove = new Command(CommandType.FusionS) { P1 = -delta };
@@ -241,14 +243,30 @@ public class Program
                     Trace.Write($"{Bot.Id}: waiting for fusion to complete");
                     return new Command(CommandType.Wait);
                 }
+            }
 
-                if (!state.CanMoveTo(Bot.P + ret.P1))
-                {
-                    // someone else is in the way
-                    Trace.Write($"{Bot.Id}: failed to {ret}, someone in the way");
-                    this.CheckDeadlock(false);
-                    return new Command(CommandType.Wait);
-                }
+            if (!state.CanMoveTo(Bot.P + ret.P1))
+            {
+                // someone else is in the way
+                Trace.Write($"{Bot.Id}: failed to {ret}, someone in the way");
+                this.CheckDeadlock(false);
+                return new Command(CommandType.Wait);
+            }
+
+            return ret;
+        }
+
+        public void AcceptCommand(Command command)
+        {
+            if (paintMoves == null)
+            {
+                return;
+            }
+
+            if (command.Type != CommandType.Fill &&
+                command.Type != CommandType.SMove)
+            {
+                return;
             }
 
             if (!paintMoves.MoveNext())
@@ -258,8 +276,6 @@ public class Program
                 paintMoves = null;
                 this.Chunk = null;
             }
-
-            return ret;
         }
 
         public void CheckDeadlock(bool success)
@@ -359,7 +375,7 @@ public class Program
                 .ToList();
 
             // Fission new bots
-            int maxBots = 1;
+            int maxBots = 40;
             int newBots = Math.Min(maxBots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
             for (var i = 0; i < newBots; ++i)
             {
@@ -444,6 +460,11 @@ public class Program
                     botPlans.Values.All(b => b == bot || !b.Veto(state, bot.Bot, command)) &&
                     volatileCells.Add(newVolatileCells);
 
+                if (success)
+                {
+                    bot.AcceptCommand(command);
+                }
+
                 bot.CheckDeadlock(success);
 
                 if (!success)
@@ -458,7 +479,7 @@ public class Program
                     }
                 }
 
-                //Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
+                Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
                 yield return command;
                 commands.Add(command);
             }

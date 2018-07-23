@@ -33,9 +33,9 @@ public class Tests
     [TestMethod]
     public void TestSolver()
     {
-        foreach (var testCase in Enumerable.Range(1, 10))
+        foreach (var testCase in Enumerable.Range(19, 1))
         {
-            var target = Model.Load(File.ReadAllBytes($"{root}\\problems\\LA{testCase:D3}_tgt.mdl"));
+            var target = Model.Load(File.ReadAllBytes($"{root}\\problems\\FA{testCase:D3}_tgt.mdl"));
 
             var solution = Program.SolveParallel(target).ToList();
 
