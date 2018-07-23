@@ -87,6 +87,7 @@ public class Program
 
         private Action<Chunk> onPaintComplete;
         private IEnumerator<Command> paintMoves;
+        private IEnumerator<Command> gotoMoves;
         private Command nextMove;
         private int fusionLock;
         private int failures;
@@ -204,6 +205,12 @@ public class Program
             }
             else
             {
+                if (gotoMoves != null &&
+                    gotoMoves.Current.CheckMove(state, Bot.P))
+                {
+                    return gotoMoves.Current;
+                }
+
                 var dest = 
                     Chunk != null ? Chunk.GetCenter() : 
                     FusionTarget != null ? FusionTarget.Bot.P :
@@ -228,7 +235,11 @@ public class Program
                     return new Command(CommandType.Wait);
                 }
 
-                return path.First();
+                //return path.First();
+
+                gotoMoves = path.GetEnumerator();
+                gotoMoves.MoveNext();
+                return gotoMoves.Current;
             }
         }
 
@@ -239,7 +250,6 @@ public class Program
             {
                 if (fusionLock > 0)
                 {
-                    // someone else is in the way
                     Trace.Write($"{Bot.Id}: waiting for fusion to complete");
                     return new Command(CommandType.Wait);
                 }
@@ -258,23 +268,29 @@ public class Program
 
         public void AcceptCommand(Command command)
         {
-            if (paintMoves == null)
-            {
-                return;
-            }
-
             if (command.Type != CommandType.Fill &&
-                command.Type != CommandType.SMove)
+                command.Type != CommandType.SMove &&
+                command.Type != CommandType.LMove)
             {
                 return;
             }
 
-            if (!paintMoves.MoveNext())
+            if (paintMoves != null)
             {
-                Trace.Write($"{Bot.Id}: done painting {Chunk.GetCenter()}");
-                onPaintComplete(this.Chunk);
-                paintMoves = null;
-                this.Chunk = null;
+                if (!paintMoves.MoveNext())
+                {
+                    Trace.Write($"{Bot.Id}: done painting {Chunk.GetCenter()}");
+                    onPaintComplete(this.Chunk);
+                    paintMoves = null;
+                    this.Chunk = null;
+                }
+            }
+            else if (gotoMoves != null)
+            {
+                if (!gotoMoves.MoveNext())
+                {
+                    gotoMoves = null;
+                }
             }
         }
 
@@ -510,7 +526,7 @@ public class State
         {
             Id = 1,
             P = Point.Zero,
-            Seeds = Enumerable.Range(2, 19).ToList()
+            Seeds = Enumerable.Range(2, 39).ToList()
         });
     }
 
@@ -1555,7 +1571,44 @@ public class Command
         }
     }
 
-    private void checkMove(
+    public bool CheckMove(State state, Point p)
+    {
+        switch (Type)
+        {
+            case CommandType.LMove:
+                return 
+                    checkMoveImpl(state, p, P1) &&
+                    checkMoveImpl(state, p + P1, P2);
+            case CommandType.SMove:
+                return checkMoveImpl(state, p, P1);
+            default:
+                throw new Exception("Cannot check move of type {Type}");
+        }
+    }
+
+    private bool checkMoveImpl(
+        State state,
+        Point p,
+        Point d)
+    {
+        var axis = d.GetAxis();
+        var index = d.GetIndex(axis);
+        var neg = index > 0 ? 1 : -1;
+
+        foreach (var i in Enumerable.Range(1, Math.Abs(index)))
+        {
+            var p2 = p + Point.FromAxisIndex(axis, i * neg);
+            if (state.Model.Get(p2) ||
+                state.Bots.Values.Any(bot => bot.P.Equals(p2)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool checkMove(
         Model model,
         VolatileCells volatileCells,
         Point p,
@@ -1570,11 +1623,13 @@ public class Command
             var p2 = p + Point.FromAxisIndex(axis, i * neg);
             if (model != null && model.Get(p2))
             {
-                throw new Exception($"Cannot move: {p2} is not empty");
+                throw new Exception($"Cannot move: {p} to {d}: {p2}");
             }
 
             volatileCells.Check(p2);
         }
+
+        return true;
     }
 }
 
