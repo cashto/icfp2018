@@ -1,4 +1,9 @@
-﻿using Newtonsoft.Json;
+﻿// I called the teacher cause I wanted to confess it now
+// Can I make the time for me to come and get it blessed somehow
+// She spoke to me in such a simple and decisive tone
+// Her sweet admission left me feeling in position from
+
+using Newtonsoft.Json;
 using Priority_Queue;
 using System;
 using System.IO;
@@ -19,6 +24,8 @@ public class Program
         public int solutionSize;
     }
 
+    // I don't take these things so personal, anymore, anymore
+    // I don't think it's irreversible, anymore
     static void Main(string[] args)
     {
         try
@@ -71,6 +78,425 @@ public class Program
         Environment.Exit(0);
     }
 
+    public class BotPlan
+    {
+        public Bot Bot { get; private set; }
+        public BotPlan FusionTarget { get; private set; }
+        public Chunk Chunk { get; private set; }
+
+        private Action<Chunk> onPaintComplete;
+        private IEnumerator<Command> paintMoves;
+        private Command droppedMove;
+        private Command nextMove;
+        private int fusionLock;
+        private int failures;
+        private int fissionThrottle;
+
+        public BotPlan(Bot bot)
+        {
+            this.Bot = bot;
+        }
+
+        public bool IsIdle()
+        {
+            return 
+                Chunk == null && 
+                FusionTarget == null &&
+                fusionLock == 0;
+        }
+
+        public void SetPaintJob(Chunk chunk, Action<Chunk> onPaintComplete)
+        {
+            this.Chunk = chunk;
+            this.onPaintComplete = onPaintComplete;
+        }
+
+        public void SetSeekFusionJob(BotPlan other)
+        {
+            if (IsIdle())
+            {
+                Trace.Write($"{Bot.Id}: seek fusion with {other.Bot.Id} at {other.Bot.P}");
+                ++other.fusionLock;
+                this.FusionTarget = other;
+            }
+        }
+
+        public void SetDroppedMove(Command command)
+        {
+            if (droppedMove != null)
+            {
+                throw new Exception("Already have a dropped move");
+            }
+
+            droppedMove = command;
+        }
+
+        public void SetFusionJob()
+        {
+            if (FusionTarget.nextMove == null)
+            {
+                var delta = this.Bot.P - FusionTarget.Bot.P;
+                this.nextMove = new Command(CommandType.FusionS) { P1 = -delta };
+                FusionTarget.nextMove = new Command(CommandType.FusionP) { P1 = delta };
+            }
+        }
+
+        public bool SetFissionJob(State state)
+        {
+            if (nextMove != null ||
+                Bot.Seeds.Count == 0 ||
+                fissionThrottle > 0)
+            {
+                return false;
+            }
+
+            var dir = Point.NearPoints.Where(d => state.CanMoveTo(this.Bot.P + d));
+            if (!dir.Any())
+            {
+                return false;
+            }
+
+            this.nextMove = new Command(CommandType.Fission)
+            {
+                P1 = dir.First(),
+                M = (Bot.Seeds.Count - 1) / 2
+            };
+
+            return true;
+        }
+
+        public Command GetCommand(State state, List<Chunk> workingChunks)
+        {
+            // Priorities: 
+            // 1. don't move if fusion lock (painting is OK).
+            // 2. fusion / fission (per nextMove)
+            // 3. painting
+            // 4. moving to paint chunk
+            // 5. moving to fusion partner
+            // 6. moving to origin
+
+            var command = getCommandImpl(state, workingChunks);
+
+            if (fusionLock > 0 && 
+                command.Type == CommandType.SMove)
+            {
+                SetDroppedMove(command);
+                return new Command(CommandType.Wait);
+            }
+
+            --fissionThrottle;
+            return command;
+        }
+
+        private Command getCommandImpl(State state, List<Chunk> workingChunks)
+        {
+            if (nextMove != null)
+            {
+                var command = nextMove;
+                if (nextMove.Type == CommandType.FusionP)
+                {
+                    --fusionLock;
+                    fissionThrottle = 5;
+                }
+
+                nextMove = null;
+                return command;
+            }
+            else if (paintMoves != null)
+            {
+                if (droppedMove != null)
+                {
+                    Trace.Write($"{Bot.Id}: doing dropped move {droppedMove}");
+                    var retMove = droppedMove;
+                    droppedMove = null;
+                    return retMove;
+                }
+
+                var ret = paintMoves.Current;
+                if (ret.Type == CommandType.SMove &&
+                    !state.CanMoveTo(Bot.P + ret.P1))
+                {
+                    // someone else is in the way
+                    Trace.Write($"{Bot.Id}: failed to {ret}, someone in the way");
+                    this.CheckDeadlock(false);
+                    return new Command(CommandType.Wait);
+                }
+
+                if (!paintMoves.MoveNext())
+                {
+                    Trace.Write($"{Bot.Id}: done painting {Chunk.GetCenter()}");
+                    onPaintComplete(this.Chunk);
+                    paintMoves = null;
+                    this.Chunk = null;
+                }
+
+                return ret;
+            }
+            else if (Chunk != null && Bot.P.Equals(Chunk.GetCenter()))
+            {
+                Trace.Write($"{Bot.Id}: start painting {Chunk.GetCenter()}");
+                paintMoves = Chunk.Paint(state, workingChunks).GetEnumerator();
+                paintMoves.MoveNext();
+                var ret = paintMoves.Current;
+                paintMoves.MoveNext();
+                return ret;
+            }
+            else if (fusionLock > 0)
+            {
+                // Don't even bother pathfinding, we have to wait.
+                return new Command(CommandType.Wait);
+            }
+            else
+            {
+                if (droppedMove != null)
+                {
+                    Trace.Write($"{Bot.Id}: doing dropped move {droppedMove}");
+                    var retMove = droppedMove;
+                    droppedMove = null;
+                    return retMove;
+                }
+
+                var dest = 
+                    Chunk != null ? Chunk.GetCenter() : 
+                    FusionTarget != null ? FusionTarget.Bot.P :
+                    Point.Zero;
+                
+                if (FusionTarget == null &&
+                    state.Bots.Values.Any(b => b.P.Equals(dest)))
+                {
+                    Trace.Write($"{Bot.Id}: pathfinding failed because cell is occupied");
+                    CheckDeadlock(false);
+                    return new Command(CommandType.Wait);
+                }
+
+                // TODO: calculate paintMoves shortly upon arrival and include here 
+                // so that peephole optimizer can eliminate stuttering.
+                var path = state.PathFind(Bot.P, dest, FusionTarget != null);
+
+                if (path == null || !path.Any())
+                {
+                    Trace.Write($"{Bot.Id}: pathfinding " + (path == null ? "failed" : "empty"));
+                    CheckDeadlock(false);
+                    return new Command(CommandType.Wait);
+                }
+
+                return path.First();
+            }
+        }
+
+        public void CheckDeadlock(bool success)
+        {
+            failures = success ? 0 : failures + 1;
+            if (failures >= 100)
+            {
+                throw new Exception("Bot is deadlocked");
+            }
+        }
+
+        public bool Veto(
+            State state,
+            Bot other,
+            Command command)
+        {
+            switch (command.Type)
+            {
+                //case CommandType.SMove:
+                //case CommandType.LMove:
+                //case CommandType.Fill:
+                //case CommandType.Fission:
+                //    break;
+                default:
+                    return false;
+            }
+
+            if (paintMoves != null)
+            {
+                return false;
+            }
+
+            var forbiddenPoint = other.P + command.P1 + command.P2;
+
+            var dest =
+                Chunk != null ? Chunk.GetCenter() :
+                FusionTarget != null ? FusionTarget.Bot.P :
+                Point.Zero;
+
+            bool veto = state.PathFind(Bot.P, dest, FusionTarget != null, forbiddenPoint) == null;
+
+            if (veto)
+            {
+                Trace.Write($"{other.Id}: {command} vetoed by {Bot.Id}");
+            }
+
+            return veto;
+        }
+    }
+
+    // Tell me now, I know that it just won't stop
+    // You will find your flow when you GO ROBOT
+    // I want to thank you and spank you upon your silver skin
+    // Robots don't care where I've been
+    // You've got to choose it to use it, so let me plug it in
+    // Robots are my next of kin
+    public static IEnumerable<Command> SolveParallel(Model target)
+    {
+        var state = new State(new Model(target.Resolution));
+        var botPlans = new Dictionary<int, BotPlan>();
+        var theBot = state.Bots.First().Value;
+        botPlans[theBot.Id] = new BotPlan(theBot);
+
+        var doneChunks = new List<Chunk>();
+        var workingChunks = new List<Chunk>();
+        var allChunks = target.GetChunks()
+            .Where(chunk => chunk.TargetPointsCount > 0)
+            .ToList();
+        var readyChunks = allChunks
+            .Where(chunk => chunk.Offset.Y == 0 && chunk.IsFillable(state.Model))
+            .ToList();
+        var newlyDoneChunks = new List<Chunk>();
+
+        while (
+            doneChunks.Count != allChunks.Count ||
+            state.Bots.Count != 1 ||
+            !state.Bots.First().Value.P.Equals(Point.Zero))
+        {
+            // Update readyChunks
+            foreach (var chunk in newlyDoneChunks)
+            {
+                doneChunks.Add(chunk);
+                var newChunks = allChunks
+                    .Where(c => (c.Offset - chunk.Offset).MDist() == 3)
+                    .Where(c => !readyChunks.Contains(c))
+                    .Where(c => !workingChunks.Contains(c))
+                    .Where(c => chunk.IsFillable(state.Model));
+                readyChunks.AddRange(newChunks);
+            }
+
+            newlyDoneChunks.Clear();
+
+            // don't start work next to another chunk in progress
+            var reallyReadyChunks = readyChunks.Where(chunk =>
+                Point.CardinalDirections.All(dir =>
+                    botPlans.Values.All(b => b.Chunk == null || !b.Chunk.Offset.Equals(chunk.Offset + 3 * dir))))
+                .ToList();
+
+            // Fission new bots
+            int maxBots = 5;
+            int newBots = Math.Min(maxBots - botPlans.Count, reallyReadyChunks.Count - botPlans.Count);
+            for (var i = 0; i < newBots; ++i)
+            {
+                var chunk = reallyReadyChunks[i];
+
+                var availableBots =
+                    from bot in botPlans.Values
+                    orderby (bot.Bot.P - chunk.GetCenter()).MDist()
+                    select bot;
+
+                foreach (var bot in availableBots)
+                {
+                    if (bot.SetFissionJob(state))
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // Assign chunks to idle bots
+            do
+            {
+                var idleBots = botPlans.Values.Where(bot => bot.IsIdle());
+                var possibleJobs =
+                    from chunk in reallyReadyChunks
+                    let newWorkingChunks = workingChunks.Concat(new List<Chunk>() { chunk })
+                    // make sure we're not accidentally sealing a chunk in
+                    where readyChunks.All(c =>  
+                        Point.CardinalDirections.Any(dir =>
+                            !newWorkingChunks.Any(w => w.Offset.Equals(c.Offset + 3 * dir))))
+                    from bot in idleBots
+                    let mdist = (chunk.GetCenter() - bot.Bot.P).MDist()
+                    orderby mdist
+                    select new { bot = bot, chunk = chunk };
+
+                if (!possibleJobs.Any())
+                {
+                    break;
+                }
+
+                var firstJob = possibleJobs.First();
+                firstJob.bot.SetPaintJob(firstJob.chunk, (chunk) =>
+                {
+                    newlyDoneChunks.Add(chunk);
+                });
+
+                reallyReadyChunks.Remove(firstJob.chunk);
+                readyChunks.Remove(firstJob.chunk);
+                workingChunks.Add(firstJob.chunk);
+            } while (true);
+
+            // Seek to fuse idle bots
+            foreach (var idleBot in botPlans.Values.Where(bot => bot.IsIdle()))
+            {
+                if (state.Bots.Count > 1)
+                {
+                    var closestBot = botPlans.Values
+                        .Where(bot => bot != idleBot)
+                        .OrderBy(bot => (idleBot.Bot.P - bot.Bot.P).MDist())
+                        .First();
+
+                    idleBot.SetSeekFusionJob(closestBot);
+                }
+            }
+
+            // Fuse bots
+            foreach (var bot in botPlans.Values
+                .Where(b => b.FusionTarget != null)
+                .Where(b => (b.Bot.P - b.FusionTarget.Bot.P).IsNear()))
+            {
+                bot.SetFusionJob();
+            }
+
+            // Execute commands
+            var volatileCells = new VolatileCells();
+            var commands = new List<Command>();
+            foreach (var bot in botPlans.Values.OrderBy(b => b.Bot.Id))
+            {
+                var command = bot.GetCommand(state, workingChunks);
+                var newVolatileCells = command.GetVolatileCells(bot.Bot.P);
+                var success = 
+                    botPlans.Values.All(b => b == bot || !b.Veto(state, bot.Bot, command)) &&
+                    volatileCells.Add(newVolatileCells);
+
+                bot.CheckDeadlock(success);
+
+                if (!success)
+                {
+                    Trace.Write($"{bot.Bot.Id}: failed to {command}");
+                    bot.SetDroppedMove(command);
+                    command = new Command(CommandType.Wait);
+                    newVolatileCells = command.GetVolatileCells(bot.Bot.P);
+                    success = volatileCells.Add(newVolatileCells);
+                    if (!success)
+                    {
+                        throw new Exception("Can't even wait successfully");
+                    }
+                }
+
+                Trace.Write($"{bot.Bot.Id}: at {bot.Bot.P}, {command}");
+                yield return command;
+                commands.Add(command);
+            }
+
+            state.Execute(commands);
+
+            // Update BotPlans due to bots being created or destroyed
+            botPlans = state.Bots.Values.ToDictionary(
+                bot => bot.Id,
+                bot => botPlans.ContainsKey(bot.Id) ? botPlans[bot.Id] : new BotPlan(bot));
+        }
+
+        yield return new Command(CommandType.Halt);
+    }
+
     public static List<Command> Solve(Model target)
     {
         var dirs = new List<Point>();
@@ -84,7 +510,9 @@ public class Program
 
         var state = new State(new Model(target.Resolution));
 
-        var chunks = findChunks(target).ToList();
+        var chunks = target.GetChunks()
+            .Where(chunk => chunk.TargetPointsCount > 0)
+            .ToList();
 
         IEnumerable<Command> ans = solveIter(
             state,
@@ -96,40 +524,9 @@ public class Program
         //var second = chunks.First().PaintAndMoveTo(state, Chunk.Origin);
         //var ans = first.Concat(second);
 
-        var peepholeOptimizers = new List<Func<IEnumerable<Command>, IEnumerable<Command>>>()
-        {
-            filterNullSMoves,
-            combineSMoves,
-            splitSMoves,
-            packSMoves
-        };
-
-        foreach (var optimizer in peepholeOptimizers)
-        {
-            ans = optimizer(ans).ToList();
-        }
-
         return ans
             .Concat(new List<Command>() { new Command(CommandType.Halt) })
             .ToList();
-    }
-
-    private static IEnumerable<Chunk> findChunks(Model model)
-    {
-        for (var x = 1; x < model.Resolution - 1; x += 3)
-        {
-            for (var y = 0; y < model.Resolution - 1; y += 3)
-            {
-                for (var z = 1; z < model.Resolution - 1; z += 3)
-                {
-                    var chunk = new Chunk(model, new Point(x, y, z));
-                    if (chunk.TargetPointsCount > 0)
-                    {
-                        yield return chunk;
-                    }
-                }
-            }
-        }
     }
 
     private static List<Command> solveIter(
@@ -170,38 +567,199 @@ public class Program
 
         return new List<Command>();
     }
+}
 
-    private static IEnumerable<Command> combineSMoves(IEnumerable<Command> commands)
+public class State
+{
+    public Model Model;
+    public int Energy;
+    public bool HighHarmonics;
+    public SortedList<int, Bot> Bots = new SortedList<int, Bot>();
+
+    public State(Model model)
     {
-        Command lastCommand = null;
-
-        foreach (var c in commands)
+        Model = model;
+        Bots.Add(1, new Bot()
         {
-            var command = c;
+            Id = 1,
+            P = Point.Zero,
+            Seeds = Enumerable.Range(2, 19).ToList()
+        });
+    }
 
-            if (lastCommand != null &&
-                command != null &&
-                lastCommand.Type == CommandType.SMove &&
-                command.Type == CommandType.SMove &&
-                lastCommand.P1.GetAxis() == command.P1.GetAxis())
+    public void Execute(
+        IEnumerable<Command> commands,
+        bool paint = false)
+    {
+        var commandsEnum = commands.GetEnumerator();
+
+        while (Bots.Any())
+        {
+            if (!paint && !isWellFormed())
             {
-                command = new Command(CommandType.SMove) { P1 = lastCommand.P1 + command.P1 };
-                if (command.P1.MDist() == 0)
+                throw new Exception("State is not well formed");
+            }
+
+            var r = Model.Resolution;
+            Energy += (HighHarmonics ? 30 : 3) * r * r * r + 20 * Bots.Count;
+
+            var commandsToExecute = new List<Tuple<Command, Bot>>();
+            foreach (var bot in Bots.Values)
+            {
+                if (!commandsEnum.MoveNext())
                 {
-                    command = null;
+                    if (commandsToExecute.Any())
+                    {
+                        throw new Exception("Not enough commands");
+                    }
+
+                    goto breakout;
                 }
-            }
-            else if (lastCommand != null)
-            {
-                yield return lastCommand;
+
+                commandsToExecute.Add(Tuple.Create(commandsEnum.Current, bot));
             }
 
-            lastCommand = command;
+            foreach (var command in commandsToExecute)
+            {
+                command.Item1.CheckFusions(command.Item2, commandsToExecute);
+            }
+
+            var volatileCells = new VolatileCells();
+            foreach (var command in commandsToExecute)
+            {
+                command.Item1.Execute(this, command.Item2, volatileCells);
+            }
         }
 
-        if (lastCommand != null)
+    breakout:
+        if (Bots.Any())
         {
-            yield return lastCommand;
+            return;
+        }
+
+        if (commandsEnum.MoveNext())
+        {
+            throw new Exception("Unexecuted commands after halt");
+        }
+
+        if (!isWellFormedTerminalState())
+        {
+            throw new Exception("Terminal state is not well formed");
+        }
+    }
+
+    public State Clone()
+    {
+        return new State(Model.Clone())
+        {
+            HighHarmonics = HighHarmonics,
+            Energy = Energy,
+            Bots = Bots.Clone()
+        };
+    }
+
+    public bool CanMoveTo(Point p)
+    {
+        return
+            Model.InBounds(p) &&
+            !Model.Get(p) &&
+            !Bots.Values.Any(bot => bot.P.Equals(p));
+    }
+
+    class PriorityQueueNode
+    {
+        public PriorityQueueNode Previous;
+        public Point P;
+        public Point Dir;
+
+        public PriorityQueueNode(
+            PriorityQueueNode previous,
+            Point p,
+            Point dir)
+        {
+            Previous = previous;
+            P = p;
+            Dir = dir;
+        }
+    }
+
+    public IEnumerable<Command> PathFind(
+        Point src,
+        Point dest,
+        bool justGetNear,
+        Point? forbiddenPoint = null)
+    {
+        var ans = pathFindImpl(src, dest, Point.Zero, justGetNear, forbiddenPoint);
+        if (ans == null)
+        {
+            return null;
+        }
+
+        var peepholeOptimizers = new List<Func<IEnumerable<Command>, IEnumerable<Command>>>()
+        {
+            filterNullSMoves,
+            combineSMoves,
+            splitSMoves,
+            packSMoves
+        };
+
+        foreach (var optimizer in peepholeOptimizers)
+        {
+            ans = optimizer(ans);
+        }
+
+        return ans;
+    }
+
+    private IEnumerable<Command> pathFindImpl(
+        Point src,
+        Point dest,
+        Point forwards,
+        bool justGetNear,
+        Point? forbiddenPoint)
+    {
+        var costs = new Dictionary<Tuple<Point, Point>, int>();
+        costs[Tuple.Create(src, forwards)] = 0;
+
+        var pq = new SimplePriorityQueue<PriorityQueueNode, int>();
+        pq.Enqueue(
+            new PriorityQueueNode(null, src, forwards),
+            (dest - src).MDist());
+
+        while (pq.Count > 0)
+        {
+            var node = pq.Dequeue();
+            if (justGetNear ? (dest - node.P).IsNear() : node.P.Equals(dest))
+            {
+                return getMoves(node).Reverse().Skip(1);
+            }
+
+            foreach (var dir in Point.CardinalDirections)
+            {
+                var p = node.P + dir;
+                if (this.CanMoveTo(p) && !forbiddenPoint.Equals(p))
+                {
+                    var newKey = Tuple.Create(p, dir);
+                    if (!costs.ContainsKey(newKey))
+                    {
+                        var previousCost = costs[Tuple.Create(node.P, node.Dir)];
+                        var newCost = previousCost + (dir.Equals(node.Dir) || dir.Equals(Point.Zero) ? 1 : 10);
+                        costs[newKey] = newCost;
+                        pq.Enqueue(new PriorityQueueNode(node, p, dir), newCost + (dest - p).MDist());
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<Command> getMoves(PriorityQueueNode node)
+    {
+        while (node != null)
+        {
+            yield return new Command(CommandType.SMove) { P1 = node.Dir };
+            node = node.Previous;
         }
     }
 
@@ -238,7 +796,7 @@ public class Program
     }
 
     private static IEnumerable<Command> packSMoves(IEnumerable<Command> commands)
-    { 
+    {
         Command lastCommand = null;
 
         foreach (var c in commands)
@@ -268,93 +826,39 @@ public class Program
             yield return lastCommand;
         }
     }
-}
 
-public class State
-{
-    public Model Model;
-    public int Energy;
-    public bool HighHarmonics;
-    public SortedList<int, Bot> Bots = new SortedList<int, Bot>();
-
-    public State(Model model)
+    private static IEnumerable<Command> combineSMoves(IEnumerable<Command> commands)
     {
-        Model = model;
-        Bots.Add(1, new Bot()
+        Command lastCommand = null;
+
+        foreach (var c in commands)
         {
-            Id = 1,
-            P = new Point(0, 0, 0),
-            Seeds = Enumerable.Range(2, 19).ToList()
-        });
-    }
+            var command = c;
 
-    public void Execute(IEnumerable<Command> commands)
-    {
-        var commandsEnum = commands.GetEnumerator();
-        var volatileCells = new VolatileCells();
-
-        while (Bots.Any())
-        {
-            if (!isWellFormed())
+            if (lastCommand != null &&
+                command != null &&
+                lastCommand.Type == CommandType.SMove &&
+                command.Type == CommandType.SMove &&
+                lastCommand.P1.GetAxis() == command.P1.GetAxis())
             {
-                throw new Exception("State is not well formed");
-            }
-
-            Energy += (HighHarmonics ? 30 : 3) + 20 * Bots.Count;
-
-            var commandsToExecute = new List<Tuple<Command, Bot>>();
-            foreach (var bot in Bots.Values)
-            {
-                if (!commandsEnum.MoveNext())
+                command = new Command(CommandType.SMove) { P1 = lastCommand.P1 + command.P1 };
+                if (command.P1.MDist() == 0)
                 {
-                    if (commandsToExecute.Any())
-                    {
-                        throw new Exception("Not enough commands");
-                    }
-
-                    goto breakout;
+                    command = null;
                 }
-
-                commandsToExecute.Add(Tuple.Create(commandsEnum.Current, bot));
             }
-
-            foreach (var command in commandsToExecute)
+            else if (lastCommand != null)
             {
-                command.Item1.CheckFusions(command.Item2, commandsToExecute);
+                yield return lastCommand;
             }
 
-            volatileCells.Clear();
-            foreach (var command in commandsToExecute)
-            {
-                command.Item1.Execute(this, command.Item2, volatileCells);
-            }
+            lastCommand = command;
         }
 
-    breakout:
-        if (Bots.Any())
+        if (lastCommand != null)
         {
-            return;
+            yield return lastCommand;
         }
-
-        if (commandsEnum.MoveNext())
-        {
-            throw new Exception("Unexecuted commands after halt");
-        }
-
-        if (!isWellFormedTerminalState())
-        {
-            throw new Exception("Terminal state is not well formed");
-        }
-    }
-
-    public State Clone()
-    {
-        return new State(Model.Clone())
-        {
-            HighHarmonics = HighHarmonics,
-            Energy = Energy,
-            Bots = Bots.Clone()
-        };
     }
 
     public bool isWellFormed()
@@ -399,6 +903,27 @@ public class Model
             matrix.SequenceEqual(other.matrix);
     }
 
+    public List<string> Compare(Model expected)
+    {
+        var ret = new List<string>();
+        for (var x = 0; x < Resolution; ++x)
+        {
+            for (var y = 0; y < Resolution; ++y)
+            {
+                for (var z = 0; z < Resolution; ++z)
+                {
+                    var p = new Point(x, y, z);
+                    if (Get(p) != expected.Get(p))
+                    {
+                        ret.Add($"{p} should be {expected.Get(p)}");
+                    }
+                }
+            }
+        }
+
+        return ret;
+    }
+
     public override int GetHashCode()
     {
         return 42;
@@ -428,6 +953,21 @@ public class Model
         updateGrounded(p);
         matrix[p.X * Resolution * Resolution + p.Y * Resolution + p.Z] = true;
     }
+
+    public IEnumerable<Chunk> GetChunks()
+    {
+        for (var x = 1; x < Resolution - 1; x += 3)
+        {
+            for (var y = 0; y < Resolution - 1; y += 3)
+            {
+                for (var z = 1; z < Resolution - 1; z += 3)
+                {
+                    yield return new Chunk(this, new Point(x, y, z));
+                }
+            }
+        }
+    }
+
 
     protected void updateGrounded(Point p)
     {
@@ -586,6 +1126,8 @@ public class Bot
 
 public struct Point
 {
+    public static readonly Point Zero = new Point(0, 0, 0);
+
     public int X { get; private set; }
     public int Y { get; private set; }
     public int Z { get; private set; }
@@ -593,11 +1135,11 @@ public struct Point
     public static readonly Point[] CardinalDirections = new Point[]
     {
         new Point(1, 0, 0),
-        new Point(0, 1, 0),
-        new Point(0, 0, 1),
         new Point(-1, 0, 0),
-        new Point(0, -1, 0),
-        new Point(0, 0, -1)
+        new Point(0, 0, 1),
+        new Point(0, 0, -1),
+        new Point(0, 1, 0),
+        new Point(0, -1, 0)
     };
 
     public static readonly Point[] NearPoints = generateNearPoints().ToArray();
@@ -624,6 +1166,20 @@ public struct Point
             lhs.Y - rhs.Y,
             lhs.Z - rhs.Z);
     }
+
+    public static Point operator -(Point p)
+    {
+        return -1 * p;
+    }
+
+    public static Point operator *(int scale, Point p)
+    {
+        return new Point(
+            scale * p.X,
+            scale * p.Y,
+            scale * p.Z);
+    }
+
 
     public override string ToString()
     {
@@ -905,6 +1461,35 @@ public class Command
         }
     }
 
+    public VolatileCells GetVolatileCells(
+        Point botPosition)
+    {
+        var ret = new VolatileCells();
+        ret.Add(botPosition);
+
+        switch (Type)
+        {
+            case CommandType.SMove:
+                checkMove(null, ret, botPosition, P1);
+                break;
+
+            case CommandType.LMove:
+                checkMove(null, ret, botPosition, P1);
+                checkMove(null, ret, botPosition + P1, P2);
+                break;
+
+            case CommandType.Fission:
+                ret.Add(botPosition + P1);
+                break;
+
+            case CommandType.Fill:
+                ret.Add(botPosition + P1);
+                break;
+        }
+
+        return ret;
+    }
+
     public void Execute(
         State state,
         Bot bot,
@@ -915,7 +1500,7 @@ public class Command
         switch (Type)
         {
             case CommandType.Halt:
-                if (!bot.P.Equals(new Point(0, 0, 0)))
+                if (!bot.P.Equals(Point.Zero))
                 {
                     throw new Exception("Halt not executed at <0,0,0>");
                 }
@@ -1056,9 +1641,9 @@ public class Command
         foreach (var i in Enumerable.Range(1, Math.Abs(index)))
         {
             var p2 = p + Point.FromAxisIndex(axis, i * neg);
-            if (model.Get(p2))
+            if (model != null && model.Get(p2))
             {
-                throw new Exception($"Cannot move: {p} is not empty");
+                throw new Exception($"Cannot move: {p2} is not empty");
             }
 
             volatileCells.Check(p2);
@@ -1072,15 +1657,30 @@ public class VolatileCells
 
     public void Check(Point p)
     {
-        if (!cells.Add(p))
+        if (!Add(p))
         {
             throw new Exception($"Point {p} is already a volatile cell");
         }
     }
 
-    public void Clear()
+    public bool Add(Point p)
     {
-        cells.Clear();
+        return cells.Add(p);
+    }
+
+    public bool Add(VolatileCells other)
+    {
+        if (other.cells.Any(cell => this.cells.Contains(cell)))
+        {
+            return false;
+        }
+
+        foreach (var cell in other.cells)
+        {
+            Add(cell);
+        }
+
+        return true;
     }
 }
 
@@ -1146,6 +1746,11 @@ public class Chunk
         }
     }
 
+    public Point GetCenter()
+    {
+        return Offset + new Point(1, 1, 1);
+    }
+
     private bool get(Model model, Point p)
     {
         return isInRange(p) ? overrideModel.Get(p - Offset) : model.Get(p);
@@ -1193,55 +1798,73 @@ public class Chunk
             return null;
         }
 
-        state.Execute(ret);
+        state.Execute(ret, paint: true);
 
         return ret.ToList();
     }
 
     private IEnumerable<Command> paintAndMoveTo(
         Model model,
-        Chunk newChunk, 
+        Chunk newChunk,
         Point forwards)
     {
-        if (target == null && !forwards.Equals(Point.CardinalDirections[0]))
+        throw new NotImplementedException();
+    }
+
+    public IEnumerable<Command> Paint(State state, List<Chunk> workingChunks)
+    {
+        foreach (var dir in Point.CardinalDirections
+            .Where(dir => !workingChunks.Any(chunk => chunk.Offset.Equals(Offset + 3 * dir))))
         {
-            return null;
-        }
-        else if (target != null)
-        {
-            var exitPoint = Offset + new Point(1, 1, 1) + forwards + forwards;
-            if (!model.InBounds(exitPoint) || model.Get(exitPoint))
+            overrideModel.Clear();
+            var ret = paint(state.Model, dir).ToList();
+            if (ret.Count(command => command.Type == CommandType.Fill) == TargetPointsCount)
             {
-                return null;
+                return ret;
             }
         }
 
-        overrideModel.Clear();
-
-        var paintMoves = target == null ? 
-            new List<Command>() : 
-            paint(model, forwards).ToList();
-
-        var gotoMoves = move(
-            model,
-            Offset + new Point(1, 1, 1) + ((target == null) ? new Point(0, 0, 0) : forwards + forwards),
-            newChunk.Offset + new Point(1, 1, 1),
-            forwards);
-
-        if (gotoMoves == null ||
-            paintMoves.Count(command => command.Type == CommandType.Fill) != TargetPointsCount)
-        {
-            return null;
-        }
-
-        return paintMoves.Concat(gotoMoves);
+        throw new Exception($"Can't paint chunk {GetCenter()}");
     }
+
+        //if (target == null && !forwards.Equals(Point.CardinalDirections[0]))
+        //{
+        //    return null;
+        //}
+        //else if (target != null)
+        //{
+        //    var exitPoint = this.GetCenter() + forwards + forwards;
+        //    if (!model.InBounds(exitPoint) || model.Get(exitPoint))
+        //    {
+        //        return null;
+        //    }
+        //}
+
+    //overrideModel.Clear();
+
+    //var paintMoves = target == null ? 
+    //    new List<Command>() : 
+    //    paint(model, forwards).ToList();
+
+    //var gotoMoves = move(
+    //    model,
+    //    this.GetCenter() + ((target == null) ? Point.Zero : forwards + forwards),
+    //    newChunk.GetCenter(),
+    //    forwards);
+
+    //if (gotoMoves == null ||
+    //    paintMoves.Count(command => command.Type == CommandType.Fill) != TargetPointsCount)
+    //{
+    //    return null;
+    //}
+
+    //return paintMoves.Concat(gotoMoves);
 
     private IEnumerable<Command> paint(Model model, Point forwards)
     {
-        var backwards = new Point(-forwards.X, -forwards.Y, -forwards.Z);
+        var backwards = -forwards;
 
-        if (model.InBounds(Offset + new Point(1, 1, 1) + backwards))
+        if (model.InBounds(this.GetCenter() + backwards))
         {
             yield return new Command(CommandType.SMove) { P1 = backwards };
             foreach (var command in tryFill(model, backwards, forwards))
@@ -1250,7 +1873,7 @@ public class Chunk
             }
 
             yield return new Command(CommandType.SMove) { P1 = forwards };
-            foreach (var command in tryFill(model, new Point(0, 0, 0), forwards))
+            foreach (var command in tryFill(model, Point.Zero, forwards))
             {
                 yield return command;
             }
@@ -1271,8 +1894,15 @@ public class Chunk
 
     public bool IsFillable(Model model)
     {
+        return paintable(model) == TargetPointsCount;
+    }
+
+    public int paintable(Model model)
+    { 
         bool done;
         var painted = 0;
+
+        overrideModel.Clear();
 
         do
         {
@@ -1299,9 +1929,7 @@ public class Chunk
             }
         } while (!done);
 
-        overrideModel.Clear();
-
-        return painted == TargetPointsCount;
+        return painted;
     }
 
     private IEnumerable<Command> tryFill(Model model, Point offset, Point forwards)
@@ -1313,7 +1941,7 @@ public class Chunk
             done = true;
             foreach (var dir in Point.NearPoints)
             {
-                var p = Offset + offset + dir + new Point(1, 1, 1);
+                var p = this.GetCenter() + offset + dir;
 
                 if (isInRange(p) &&
                     target.InBounds(p) &&
@@ -1331,69 +1959,5 @@ public class Chunk
                 }
             }
         } while (!done);
-    }
-
-    class PriorityQueueNode
-    {
-        public PriorityQueueNode Previous;
-        public Point P;
-        public Point Dir;
-
-        public PriorityQueueNode(
-            PriorityQueueNode previous,
-            Point p,
-            Point dir)
-        {
-            Previous = previous;
-            P = p;
-            Dir = dir;
-        }
-    }
-
-    private IEnumerable<Command> move(Model model, Point src, Point dest, Point forwards)
-    {
-        var costs = new Dictionary<Tuple<Point, Point>, int>();
-        costs[Tuple.Create(src, forwards)] = 0;
-
-        var pq = new SimplePriorityQueue<PriorityQueueNode, int>();
-        pq.Enqueue(
-            new PriorityQueueNode(null, src, forwards),
-            (dest - src).MDist());
-
-        while (pq.Count > 0)
-        {
-            var node = pq.Dequeue();
-            if (node.P.Equals(dest))
-            {
-                return getMoves(node).Reverse().Skip(1);
-            }
-
-            foreach (var dir in Point.CardinalDirections)
-            {
-                var p = node.P + dir;
-                if (model.InBounds(p) && !get(model, p))
-                {
-                    var newKey = Tuple.Create(p, dir);
-                    if (!costs.ContainsKey(newKey))
-                    {
-                        var previousCost = costs[Tuple.Create(node.P, node.Dir)];
-                        var newCost = previousCost + (dir.Equals(node.Dir) ? 1 : 10);
-                        costs[newKey] = newCost;
-                        pq.Enqueue(new PriorityQueueNode(node, p, dir), newCost + (dest - p).MDist());
-                    }
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static IEnumerable<Command> getMoves(PriorityQueueNode node)
-    {
-        while (node != null)
-        {
-            yield return new Command(CommandType.SMove) { P1 = node.Dir };
-            node = node.Previous;
-        }
     }
 }

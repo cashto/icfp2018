@@ -33,17 +33,22 @@ public class Tests
     [TestMethod]
     public void TestSolver()
     {
-        var testCase = 20;
+        var testCase = 40;
 
         var target = Model.Load(File.ReadAllBytes($"{root}\\problems\\LA{testCase:D3}_tgt.mdl"));
 
-        var solution = Program.Solve(target);
+        var solution = Program.SolveParallel(target).ToList();
 
         var state = new State(new Model(target.Resolution));
 
         state.Execute(solution);
 
-        Assert.AreEqual(target, state.Model);
+        var differences = state.Model.Compare(target);
+
+        Assert.AreEqual(target, state.Model, 
+            differences.Count < 20 ? string.Join(", ", differences) : $"{differences.Count} differences");
+
+        Console.Write($"Solution length: {solution.Count}, energy: {state.Energy}");
     }
 
     const string root = @"C:\Users\cashto\Documents\GitHub\icfp2018\";
